@@ -1,8 +1,8 @@
 package logging
 
 import (
-	"os"
 	"log"
+	"os"
 )
 
 const (
@@ -13,15 +13,15 @@ type Handler interface {
 	Log(format string, v ...interface{})
 	Off()
 	IsOff() bool
-    Close() error
-    Run()
-    Name() string
+	Close() error
+	Run()
+	Name() string
 }
 
 type StdHandler struct {
 	name string
-	off bool
-	log *log.Logger
+	off  bool
+	log  *log.Logger
 }
 
 func (h StdHandler) Log(format string, v ...interface{}) {
@@ -31,7 +31,7 @@ func (h StdHandler) Log(format string, v ...interface{}) {
 }
 
 func (h *StdHandler) Off() {
-	h.off = true	
+	h.off = true
 }
 
 func (h StdHandler) IsOff() bool {
@@ -55,8 +55,8 @@ func (h *StdHandler) Close() error {
 
 func NewStdHandler() (*StdHandler, error) {
 	return &StdHandler{
-		name : "StdHandler",
-		off  : false,
-		log  : log.New(os.Stdout, "", DEFLOGFLAG),
+		name: "StdHandler",
+		off:  false,
+		log:  log.New(os.Stdout, "", DEFLOGFLAG),
 	}, nil
 }
