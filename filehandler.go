@@ -1,19 +1,12 @@
 package logging
 
 import (
-	"fmt"
-	"io/ioutil"
-	"log"
 	"os"
+	"fmt"
+	"log"
 	"path"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
-)
-
-const (
-	DEFROTATINGINTERVAL = 120
 )
 
 type FileHandler struct {
@@ -58,6 +51,10 @@ func (fh *FileHandler) Close() error {
 	return nil
 }
 
+func (fh *FileHandler) SetFlags(flag int) {
+	fh.log.SetFlags(flag)
+}
+
 func NewFileHandler(name string, filePath string) (*FileHandler, error) {
 	if filePath == "" {
 		return nil, fmt.Errorf("handler filePath is null.")
@@ -88,15 +85,17 @@ type SizeRotatingFileHandler struct {
 	fileLock   *sync.RWMutex
 	nextSuffix int
 	running    bool
-	chQuit     chan bool
-	chTimer    chan bool
+	rotatingLock *sync.RWMutex
+	rotatingRun bool
+	rotatingInterval int
 }
 
-func (srfh SizeRotatingFileHandler) Log(format string, v ...interface{}) {
+func (srfh *SizeRotatingFileHandler) Log(format string, v ...interface{}) {
 	if srfh.log != nil {
 		srfh.fileLock.RLock()
 		srfh.log.Printf(format, v...)
 		srfh.fileLock.RUnlock()
+		go srfh.rotating()
 	}
 }
 
@@ -110,46 +109,7 @@ func (srfh SizeRotatingFileHandler) IsOff() bool {
 
 func (srfh *SizeRotatingFileHandler) Run() {
 	srfh.running = true
-	srfh.CheckNextSuffix()
-
-	//start Timer
-	go func(srfh *SizeRotatingFileHandler, interval int) {
-		for {
-			if !srfh.running {
-				//fmt.Println("SizeRotatingFileHandler %s Timer quit.", srfh.Name())
-				return
-			}
-			srfh.chTimer <- true
-			time.Sleep(time.Duration(interval) * time.Second)
-		}
-	}(srfh, DEFROTATINGINTERVAL)
-
-	//wait Timer for check file size or quit
-	for {
-		select {
-		case <-srfh.chTimer:
-			fileinfo, err := os.Stat(srfh.filePath)
-			if err != nil {
-				srfh.Log("ERROR cat not get %s status. skip rotating.", srfh.Name())
-				continue
-			}
-			if fileinfo.Size() > srfh.fileSize {
-				if srfh.nextSuffix > srfh.fileCount {
-					srfh.nextSuffix = 1
-				}
-				srfh.fileLock.Lock()
-				srfh.fileFd.Close()
-				os.Rename(srfh.filePath, fmt.Sprintf("%s.%d", srfh.filePath, srfh.nextSuffix))
-				srfh.fileFd, _ = os.OpenFile(srfh.filePath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0666)
-				srfh.log = log.New(srfh.fileFd, "", DEFLOGFLAG)
-				srfh.nextSuffix++
-				srfh.fileLock.Unlock()
-			}
-		case <-srfh.chQuit:
-			srfh.running = false
-			return
-		}
-	}
+	srfh.rotateOnce()
 }
 
 func (srfh SizeRotatingFileHandler) Name() string {
@@ -157,14 +117,12 @@ func (srfh SizeRotatingFileHandler) Name() string {
 }
 
 func (srfh *SizeRotatingFileHandler) Close() error {
+	srfh.rotateOnce()
 	srfh.fileCount = 0
 	srfh.fileSize = 0
-	srfh.fileLock = nil
 	srfh.nextSuffix = 0
-	srfh.running = false
-	srfh.chQuit <- true
-	close(srfh.chQuit)
-	close(srfh.chTimer)
+	srfh.fileLock.Lock()
+	defer srfh.fileLock.Unlock()
 	err := srfh.FileHandler.Close()
 	if err != nil {
 		return err
@@ -172,29 +130,70 @@ func (srfh *SizeRotatingFileHandler) Close() error {
 	return nil
 }
 
-func (srfh *SizeRotatingFileHandler) CheckNextSuffix() {
-	filename := path.Base(srfh.filePath)
-	files, err := ioutil.ReadDir(path.Dir(srfh.filePath))
+func (srfh *SizeRotatingFileHandler) SetFlags(flag int) {
+	srfh.log.SetFlags(flag)
+}
+
+func (srfh *SizeRotatingFileHandler) isRotatingRun() bool {
+	srfh.rotatingLock.RLock()
+	defer srfh.rotatingLock.RUnlock()
+	return srfh.rotatingRun
+}
+
+func (srfh *SizeRotatingFileHandler) setRotatingRun(bRun bool) {
+	srfh.rotatingLock.Lock()
+	defer srfh.rotatingLock.Unlock()
+	srfh.rotatingRun = bRun
+}
+
+func (srfh *SizeRotatingFileHandler) rotateOnce() {
+	srfh.fileLock.Lock()
+	defer srfh.fileLock.Unlock()
+	fileinfo, err := os.Stat(srfh.filePath)
 	if err != nil {
+		srfh.Log("ERROR cat not get %s status. quit rotating.", srfh.Name())
 		return
 	}
-
-	var minModTime int64 = 0
-	var nextSuffix int = 0
-	for _, file := range files {
-		if !file.IsDir() && strings.HasPrefix(file.Name(), filename+".") {
-			suffix := strings.Replace(file.Name(), filename+".", "", -1)
-			isuffix, err := strconv.Atoi(suffix)
-			if err == nil {
-				if minModTime == 0 || minModTime > file.ModTime().Unix() {
-					minModTime = file.ModTime().Unix()
-					nextSuffix = isuffix
-				}
-			}
+	if fileinfo.Size() >= srfh.fileSize {
+		flag := srfh.log.Flags()
+		srfh.fileFd.Close()
+		os.Rename(srfh.filePath, fmt.Sprintf("%s.%d", srfh.filePath, srfh.nextSuffix))
+		srfh.fileFd, _ = os.OpenFile(srfh.filePath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0666)
+		srfh.log = log.New(srfh.fileFd, "", flag)
+		if srfh.nextSuffix >= (srfh.fileCount - 1) {
+			srfh.nextSuffix = 1
+		} else {
+			srfh.nextSuffix++
 		}
 	}
-	if nextSuffix < srfh.fileCount {
-		srfh.nextSuffix = nextSuffix
+}
+
+func (srfh *SizeRotatingFileHandler) rotating() {
+	if srfh.nextSuffix == 0 || srfh.isRotatingRun() {
+		return
+	}
+	srfh.setRotatingRun(true)
+	srfh.rotateOnce()
+	time.Sleep(time.Duration(srfh.rotatingInterval)*time.Millisecond)
+	srfh.setRotatingRun(false)
+}
+
+func (srfh *SizeRotatingFileHandler) checkNextSuffix() {
+	if srfh.nextSuffix == 0 {
+		return
+	}
+	var minModTime int64
+	for n := 1; n < srfh.fileCount; n++ {
+		filepath := fmt.Sprintf("%s.%d", srfh.filePath, n)
+		if fileinfo, err := os.Stat(filepath); !os.IsNotExist(err) {
+			if (minModTime == 0 || minModTime > fileinfo.ModTime().Unix()) {
+				minModTime = fileinfo.ModTime().Unix()
+				srfh.nextSuffix = n
+			}
+		} else {
+			srfh.nextSuffix = n
+			break
+		}
 	}
 }
 
@@ -205,14 +204,45 @@ func NewSizeRotatingFileHandler(
 	if err != nil {
 		return nil, err
 	}
-	return &SizeRotatingFileHandler{
-		FileHandler: *fh,
-		fileCount:   fileCount,
-		fileSize:    fileSize,
-		fileLock:    new(sync.RWMutex),
-		nextSuffix:  1,
-		running:     false,
-		chQuit:      make(chan bool),
-		chTimer:     make(chan bool),
-	}, nil
+
+	//check fileCount and fileSize
+	nSuffix := 1
+	nCount := 1
+	if fileCount < 0 || fileCount == 1 {
+		nSuffix = 0
+	} else {
+		nCount = fileCount
+	}
+	nSize := MB
+	if fileSize > 0 {
+		nSize = fileSize
+	}
+
+	nInterval := 0
+	switch {
+		case nSize < 10*KB:
+			nInterval = 0
+		case nSize <= MB: 
+			nInterval = 100
+		case nSize <= 100*MB:
+			nInterval = 10000
+		case nSize <= GB:
+			nInterval = 50000
+		default:
+			nInterval = 100000
+	}
+
+	srfh := &SizeRotatingFileHandler {
+		FileHandler      : *fh,
+		fileCount        : nCount,
+		fileSize         : nSize,
+		fileLock         : new(sync.RWMutex),
+		nextSuffix       : nSuffix,
+		running          : false,
+		rotatingLock     : new(sync.RWMutex),
+		rotatingRun      : false,
+		rotatingInterval : nInterval,
+	}
+	srfh.checkNextSuffix()
+	return srfh, nil
 }

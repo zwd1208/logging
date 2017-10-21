@@ -16,6 +16,7 @@ type Handler interface {
 	Close() error
 	Run()
 	Name() string
+	SetFlags(flag int)
 }
 
 type StdHandler struct {
@@ -51,6 +52,12 @@ func (h *StdHandler) Close() error {
 	h.off = true
 	h.log = nil
 	return nil
+}
+
+func (h *StdHandler) SetFlags(flag int) {
+	if h.log != nil {
+		h.log.SetFlags(flag)
+	}
 }
 
 func NewStdHandler() (*StdHandler, error) {

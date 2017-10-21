@@ -58,7 +58,7 @@ func (l *Logger) AddHandler(h Handler) error {
 		}
 	}
 	l.handlers = append(l.handlers, h)
-	go h.Run()
+	h.Run()
 	return nil
 }
 
@@ -74,7 +74,7 @@ func (l Logger) log(level LEVEL, format string, v ...interface{}) {
 		for _, handler := range l.handlers {
 			if !handler.IsOff() {
 				f := fmt.Sprintf("%s %s\n", level.String(), format)
-				go handler.Log(f, v...)
+				handler.Log(f, v...)
 			}
 		}
 	}
